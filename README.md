@@ -84,11 +84,15 @@ python3 -m http.server 8000        # プロジェクトルートで
 - **ネイティブ system EQ** — CoreAudio の殻が wasm を wasmtime でホスト
   (Almide リポジトリの `porta/src/wasm_rt.almd` が同型の実装)
 
-### 既知の制約
+### ネイティブ連携 / 既知の制約
 
-`almide 0.27.10` の `--cdylib` は有効な dylib を生成するが、**public 関数を C-ABI
-シンボルとして自動エクスポートしない**(`nm -gU` でシンボル 0)。よってネイティブ連携は
-**wasm 経由**(public fn が wasm export される)が本命。`build --target` は `wasm` / `npm`。
+ネイティブ C-ABI で公開するには関数に **`@export(c, "symbol")`** を付ける(`@extern(c)` の逆。
+plain な public fn は自動エクスポートされない)。これで `almide build --cdylib --repr-c` が
+`#[no_mangle] pub extern "C"` を出力し、CoreAudio の殻から dylib を直リンクできる。
+あるいは `--target wasm`(public fn が wasm export される)を wasmtime 等でホストする手もある。
+
+注: `build --target npm`(JS バインディング)は 0.27.10 では非機能スタブ(upstream に issue 済み)。
+JS から wasm を直接叩く場合、`Int` は wasm `i64` = JS `BigInt` の境界に注意。
 
 ## ステータス
 
