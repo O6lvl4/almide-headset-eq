@@ -1,0 +1,10 @@
+# Almide / Rust build artifacts
+/target/
+/dist/
+.almide/
+*.dylib
+*.so
+*.wasm
+
+# macOS
+.DS_Store

@@ -1,0 +1,151 @@
+// eq — parametric audio equalizer built from cascaded RBJ biquad filters.
+//
+// Pure-logic DSP core (NO Matrix runtime): only Float, List[Float], records and
+// stdlib math. Designed to compile to Rust / WASM and be driven by a thin native
+// audio shim (CoreAudio / cpal) at the OS boundary. Target: the CYBER CY-P5GMWHS
+// headset, fed via its 2.4GHz USB dongle (48 kHz USB-audio).
+
+import math
+
+// ── Biquad state + coefficients (Direct Form I) ──
+
+type BiQuad = {
+  b0: Float, b1: Float, b2: Float,   // feedforward coeffs (already a0-normalized)
+  a1: Float, a2: Float,              // feedback coeffs    (already a0-normalized)
+  x1: Float, x2: Float,              // input history  x[n-1], x[n-2]
+  y1: Float, y2: Float               // output history y[n-1], y[n-2]
+}
+
+// ── Coefficient design: RBJ Audio-EQ-Cookbook peaking filter ──
+// fs: sample rate (Hz), f0: center freq (Hz), q: quality, gain_db: boost/cut (dB).
+
+fn design_peaking(fs: Float, f0: Float, q: Float, gain_db: Float) -> BiQuad = {
+  let a = math.fpow(10.0, gain_db / 40.0)
+  let w0 = 2.0 * math.pi() * f0 / fs
+  let cw = math.cos(w0)
+  let sw = math.sin(w0)
+  let alpha = sw / (2.0 * q)
+  let b0 = 1.0 + alpha * a
+  let b1 = -2.0 * cw
+  let b2 = 1.0 - alpha * a
+  let a0 = 1.0 + alpha / a
+  let a1 = -2.0 * cw
+  let a2 = 1.0 - alpha / a
+  BiQuad {
+    b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+    a1: a1 / a0, a2: a2 / a0,
+    x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0
+  }
+}
+
+// ── Single-sample step (Direct Form I difference equation) ──
+// Returns (output, advanced-state).
+
+fn process_sample(f: BiQuad, x: Float) -> (Float, BiQuad) = {
+  let y = f.b0 * x + f.b1 * f.x1 + f.b2 * f.x2 - f.a1 * f.y1 - f.a2 * f.y2
+  let next = { ...f, x2: f.x1, x1: x, y2: f.y1, y1: y }
+  (y, next)
+}
+
+// ── Run one filter across a whole buffer, threading state ──
+
+// O(n), in-place: each output element is written once. Reading samples[i]
+// before writing out[i] keeps this correct even if the runtime aliases the
+// backing storage — process_sample at step i needs only x[i] plus the carried
+// state (history), never a sample index we have already overwritten.
+fn process_buffer(f: BiQuad, samples: List[Float]) -> List[Float] = {
+  var state = f
+  var out = samples
+  for i in 0..list.len(samples) {
+    let (y, next) = process_sample(state, samples[i])
+    out[i] = y
+    state = next
+  }
+  out
+}
+
+// ── Cascade an EQ chain: each band applied in series ──
+
+fn process_chain(bands: List[BiQuad], samples: List[Float]) -> List[Float] =
+  list.fold(bands, samples, (buf, band) => process_buffer(band, buf))
+
+// ── The CY-P5GMWHS corrective curve (mirrors the eqMac graphic curve) ──
+// Cut mud (125/250), lift mids+presence (1k/2k), tame harshness (4k), add air (8k/16k).
+
+fn cyber_curve() -> List[BiQuad] = [
+  design_peaking(48000.0,   125.0, 1.0, -2.5),
+  design_peaking(48000.0,   250.0, 1.0, -2.0),
+  design_peaking(48000.0,  1000.0, 1.0,  1.5),
+  design_peaking(48000.0,  2000.0, 1.0,  1.5),
+  design_peaking(48000.0,  4000.0, 1.0, -1.0),
+  design_peaking(48000.0,  8000.0, 1.0,  1.0),
+  design_peaking(48000.0, 16000.0, 1.0,  1.0),
+]
+
+// ── Tests: prove the DSP math with no external reference ──
+
+fn approx(a: Float, b: Float) -> Bool =
+  float.abs(a - b) < 0.0001
+
+fn at(xs: List[Float], i: Int) -> Float =
+  list.get(xs, i) |> option.unwrap_or(-999.0)
+
+test "impulse response h[0] equals b0" {
+  // With zero history, y[0] = b0 * 1 = b0 — verifies the difference equation.
+  let f = design_peaking(48000.0, 1000.0, 1.0, 6.0)
+  let out = process_buffer(f, [1.0, 0.0, 0.0, 0.0])
+  assert(approx(at(out, 0), f.b0))
+}
+
+test "zero-dB peaking is exact passthrough" {
+  // gain_db = 0 => A = 1 => numerator == denominator => H(z) = 1.
+  let f = design_peaking(48000.0, 1000.0, 1.0, 0.0)
+  let input = [0.3, -0.7, 0.5, 0.9, -0.2]
+  let out = process_buffer(f, input)
+  assert(approx(at(out, 0),  0.3))
+  assert(approx(at(out, 1), -0.7))
+  assert(approx(at(out, 4), -0.2))
+}
+
+// Analytic transfer-function magnitude at DC (z=1) and Nyquist (z=-1).
+fn dc_gain(f: BiQuad) -> Float =
+  (f.b0 + f.b1 + f.b2) / (1.0 + f.a1 + f.a2)
+
+fn nyquist_gain(f: BiQuad) -> Float =
+  (f.b0 - f.b1 + f.b2) / (1.0 - f.a1 + f.a2)
+
+fn max_abs_tail(xs: List[Float], from: Int) -> Float =
+  list.fold(list.range(from, list.len(xs)), 0.0,
+    (m, i) => float.max(m, float.abs(at(xs, i))))
+
+test "peaking DC gain is exactly unity (analytic)" {
+  // A peaking filter must not touch DC, whatever the band gain is.
+  let f = design_peaking(48000.0, 1000.0, 1.0, 12.0)
+  assert(approx(dc_gain(f), 1.0))
+}
+
+test "peaking Nyquist gain is exactly unity (analytic)" {
+  let f = design_peaking(48000.0, 1000.0, 1.0, 12.0)
+  assert(approx(nyquist_gain(f), 1.0))
+}
+
+test "full corrective chain settles to unity at DC" {
+  // Integration test: feed enough samples for the slow 125 Hz band to settle.
+  let ones = list.map(list.range(0, 8000), (_) => 1.0)
+  let out = process_chain(cyber_curve(), ones)
+  assert(approx(at(out, 7999), 1.0))
+}
+
+test "peaking +6 dB ~doubles its center-frequency amplitude" {
+  // The EQ actually works: a 1 kHz sine through a +6 dB / 1 kHz band gains
+  // 10^(6/20) = 1.995x once the transient has settled.
+  let fs = 48000.0
+  let f0 = 1000.0
+  let n  = 4800
+  let x = list.map(list.range(0, n),
+    (i) => math.sin(2.0 * math.pi() * f0 * int.to_float(i) / fs))
+  let y = process_buffer(design_peaking(fs, f0, 1.0, 6.0), x)
+  let gain = max_abs_tail(y, n - 480)   // last 10 cycles, post-transient
+  assert(gain > 1.9)
+  assert(gain < 2.1)
+}
