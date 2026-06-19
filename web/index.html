@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>headset-eq — Almide-designed EQ for CY-P5GMWHS</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+         background: #0e1116; color: #d6deeb; margin: 0; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #8a99b3; margin: 0 0 20px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+  button { font: inherit; background: #1b2330; color: #d6deeb; border: 1px solid #303c52;
+           border-radius: 7px; padding: 8px 14px; cursor: pointer; }
+  button:hover { border-color: #5a7bd6; }
+  button.on { background: #2f6f4f; border-color: #43a06f; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #status { color: #8a99b3; }
+  #status.err { color: #ff8080; }
+  canvas { width: 100%; max-width: 760px; height: 240px; background: #11161f;
+           border: 1px solid #283246; border-radius: 8px; display: block; margin: 14px 0; }
+  table { border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { border: 1px solid #283246; padding: 3px 9px; text-align: right; }
+  th { color: #8a99b3; font-weight: normal; }
+  code { color: #9cdcfe; }
+  .tag { color: #c586c0; }
+</style>
+</head>
+<body>
+  <h1>headset-eq <span class="tag">// Almide-designed parametric EQ</span></h1>
+  <p class="sub">
+    CYBER <code>CY-P5GMWHS</code> 補正カーブ。係数は <code>headset_eq.wasm</code>
+    (Almide製の RBJ biquad 設計)から読み、ブラウザの <code>IIRFilterNode</code> が実行します。
+  </p>
+
+  <div class="row">
+    <button id="tone">▶ 1kHz トーン</button>
+    <button id="noise">▶ ピンクノイズ</button>
+    <label><button id="pick">▶ 音声ファイル…</button><input id="file" type="file" accept="audio/*" hidden></label>
+    <button id="stop" disabled>■ 停止</button>
+    <button id="eq" class="on">EQ: ON</button>
+  </div>
+  <div class="row"><span id="status">wasm を読み込み中…</span></div>
+
+  <canvas id="plot" width="1520" height="480"></canvas>
+  <div id="coeffs"></div>
+
+<script type="module">
+const WASM_URL = '../dist/headset_eq.wasm';   // built via: almide build src/eq.almd --target wasm -o dist/headset_eq.wasm
+const $ = s => document.querySelector(s);
+const statusEl = $('#status');
+const setStatus = (m, err=false) => { statusEl.textContent = m; statusEl.className = err ? 'err' : ''; };
+
+let coeffs = [];        // [{b0,b1,b2,a1,a2}] designed by Almide
+let ctx = null;         // AudioContext
+let source = null;      // currently playing source node
+let eqOn = true;
+
+// ── Load Almide's wasm and pull the biquad coefficients (scalar boundary only) ──
+async function loadCoeffs() {
+  const res = await fetch(WASM_URL);
+  if (!res.ok) throw new Error(`${WASM_URL} が見つかりません。先に \`almide build src/eq.almd --target wasm -o dist/headset_eq.wasm\` を実行してください。`);
+  const bytes = await res.arrayBuffer();
+  // The module imports two WASI fns (for println/exit) that our compute path never calls — stub them.
+  const wasi = { fd_write: () => 0, proc_exit: () => {} };
+  const { instance } = await WebAssembly.instantiate(bytes, { wasi_snapshot_preview1: wasi });
+  const ex = instance.exports;
+  if (typeof ex._start === 'function') { try { ex._start(); } catch (_) {} }
+  const n = Number(ex.num_bands());                 // Almide Int -> wasm i64 -> JS BigInt
+  const out = [];
+  for (let b = 0; b < n; b++) {
+    const c = [0, 1, 2, 3, 4].map(k => ex.band_coeff(BigInt(b), BigInt(k)));
+    out.push({ b0: c[0], b1: c[1], b2: c[2], a1: c[3], a2: c[4] });
+  }
+  return out;
+}
+
+// ── Build the IIR chain from Almide's coefficients (a0 already normalized) ──
+function buildChain(ac) {
+  return coeffs.map(c => new IIRFilterNode(ac, {
+    feedforward: [c.b0, c.b1, c.b2],
+    feedback:    [1.0,  c.a1, c.a2],
+  }));
+}
+
+function connectGraph(node) {
+  // node -> [chain] -> destination, or node -> destination when EQ is bypassed
+  if (eqOn && coeffs.length) {
+    const chain = buildChain(ctx);
+    node.connect(chain[0]);
+    for (let i = 0; i < chain.length - 1; i++) chain[i].connect(chain[i + 1]);
+    chain[chain.length - 1].connect(ctx.destination);
+  } else {
+    node.connect(ctx.destination);
+  }
+}
+
+function ensureCtx() { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); return ctx; }
+function stop() {
+  if (source) { try { source.stop(); } catch (_) {} try { source.disconnect(); } catch (_) {} source = null; }
+  $('#stop').disabled = true;
+}
+
+function playTone() {
+  ensureCtx(); stop();
+  const osc = ctx.createOscillator();
+  osc.type = 'sine'; osc.frequency.value = 1000;
+  source = osc; connectGraph(osc); osc.start();
+  $('#stop').disabled = false; setStatus('再生中: 1kHz トーン  (EQ で減衰/増幅を耳で確認)');
+}
+
+function playNoise() {
+  ensureCtx(); stop();
+  const dur = 4, sr = ctx.sampleRate, buf = ctx.createBuffer(1, sr * dur, sr), d = buf.getChannelData(0);
+  // simple pink-ish noise (Voss-McCartney lite)
+  let b0=0,b1=0,b2=0;
+  for (let i=0;i<d.length;i++){ const w=Math.random()*2-1; b0=0.99765*b0+w*0.0990460; b1=0.96300*b1+w*0.2965164; b2=0.57000*b2+w*1.0526913; d[i]=(b0+b1+b2+w*0.1848)*0.18; }
+  const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+  source = src; connectGraph(src); src.start();
+  $('#stop').disabled = false; setStatus('再生中: ピンクノイズ  (EQ ON/OFF で帯域バランスの差が分かりやすい)');
+}
+
+async function playFile(file) {
+  ensureCtx(); stop();
+  const buf = await ctx.decodeAudioData(await file.arrayBuffer());
+  const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+  source = src; connectGraph(src); src.start();
+  $('#stop').disabled = false; setStatus(`再生中: ${file.name}  (ループ)`);
+}
+
+// ── Draw the chain's total magnitude response (proof the EQ shapes the spectrum) ──
+function drawResponse() {
+  const cv = $('#plot'), g = cv.getContext('2d'), W = cv.width, H = cv.height;
+  g.clearRect(0,0,W,H); g.fillStyle = '#11161f'; g.fillRect(0,0,W,H);
+  const N = 480, f0 = 20, f1 = 20000;
+  const freqs = new Float32Array(N);
+  for (let i=0;i<N;i++) freqs[i] = f0 * Math.pow(f1/f0, i/(N-1));   // log sweep 20..20k
+  // total magnitude = product across bands
+  const total = new Float32Array(N).fill(1);
+  const ac = new OfflineAudioContext(1, 1, 48000);
+  for (const c of coeffs) {
+    const iir = new IIRFilterNode(ac, { feedforward:[c.b0,c.b1,c.b2], feedback:[1,c.a1,c.a2] });
+    const mag = new Float32Array(N), ph = new Float32Array(N);
+    iir.getFrequencyResponse(freqs, mag, ph);
+    for (let i=0;i<N;i++) total[i] *= mag[i];
+  }
+  // axes: y in dB, range -8..+4
+  const dbMin=-8, dbMax=4;
+  const x = i => (i/(N-1))*W;
+  const y = db => H - ((db-dbMin)/(dbMax-dbMin))*H;
+  g.strokeStyle = '#283246'; g.lineWidth = 1;
+  for (const db of [-6,-4,-2,0,2,4]) { g.beginPath(); g.moveTo(0,y(db)); g.lineTo(W,y(db)); g.stroke();
+    g.fillStyle='#5b6b85'; g.font='20px monospace'; g.fillText(db+' dB', 6, y(db)-4); }
+  for (const f of [100,1000,10000]) { const i=(Math.log(f/f0)/Math.log(f1/f0))*(N-1);
+    g.beginPath(); g.moveTo(x(i),0); g.lineTo(x(i),H); g.stroke(); g.fillText((f>=1000?f/1000+'k':f)+'Hz', x(i)+4, H-8); }
+  g.strokeStyle = '#5a7bd6'; g.lineWidth = 3; g.beginPath();
+  for (let i=0;i<N;i++){ const db = 20*Math.log10(total[i]); const py=y(db); i?g.lineTo(x(i),py):g.moveTo(x(i),py); }
+  g.stroke();
+}
+
+function showCoeffs() {
+  const fr = [125,250,1000,2000,4000,8000,16000], gn = [-2.5,-2,1.5,1.5,-1,1,1];
+  let h = '<table><tr><th>band</th><th>freq</th><th>gain</th><th>b0</th><th>b1</th><th>b2</th><th>a1</th><th>a2</th></tr>';
+  coeffs.forEach((c,i) => { h += `<tr><td>${i}</td><td>${fr[i]} Hz</td><td>${gn[i]>0?'+':''}${gn[i]} dB</td>`+
+    `<td>${c.b0.toFixed(4)}</td><td>${c.b1.toFixed(4)}</td><td>${c.b2.toFixed(4)}</td><td>${c.a1.toFixed(4)}</td><td>${c.a2.toFixed(4)}</td></tr>`; });
+  $('#coeffs').innerHTML = h + '</table>';
+}
+
+// ── wire up ──
+$('#tone').onclick = playTone;
+$('#noise').onclick = playNoise;
+$('#pick').onclick = () => $('#file').click();
+$('#file').onchange = e => e.target.files[0] && playFile(e.target.files[0]);
+$('#stop').onclick = () => { stop(); setStatus('停止'); };
+$('#eq').onclick = () => {
+  eqOn = !eqOn; const btn = $('#eq');
+  btn.textContent = 'EQ: ' + (eqOn ? 'ON' : 'OFF'); btn.classList.toggle('on', eqOn);
+  if (source) {                                   // re-route the live graph
+    const playing = source; try { playing.disconnect(); } catch(_) {}
+    connectGraph(playing);
+  }
+};
+
+try {
+  coeffs = await loadCoeffs();
+  setStatus(`${coeffs.length} バンドの係数を wasm から取得。トーン/ノイズ/ファイルで再生し、EQ ON/OFF で比較してください。`);
+  drawResponse(); showCoeffs();
+} catch (e) { setStatus(e.message, true); console.error(e); }
+</script>
+</body>
+</html>

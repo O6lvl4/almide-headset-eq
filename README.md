@@ -43,6 +43,22 @@ almide run                  # デモ: インパルス応答 + 各バンド中心
 almide build src/eq.almd --target wasm --release -o dist/headset_eq.wasm
 ```
 
+### ブラウザで試す(WebAudio デモ)
+
+```bash
+almide build src/eq.almd --target wasm --release -o dist/headset_eq.wasm
+python3 -m http.server 8000        # プロジェクトルートで
+# → http://127.0.0.1:8000/web/ を開く
+```
+
+`web/index.html` は **Almide が設計した biquad 係数を wasm から読み**、ブラウザの
+`IIRFilterNode` チェインに流して実行する。トーン/ピンクノイズ/音声ファイルに EQ をかけ、
+`EQ: ON/OFF` で A/B 比較でき、チェイン全体の周波数応答も描画する。
+
+> DSP の本体(RBJ 係数設計)は Almide。実際の差分方程式の実行だけ WebAudio の IIR に委譲。
+> wasm 境界はスカラのみ(`num_bands() -> Int`, `band_coeff(band, k) -> Float`)。
+> 注: Almide の `Int` は wasm `i64` = JS では **BigInt**。引数は `BigInt(b)` で渡す。
+
 ### テスト(`almide test`)
 
 整定に依存しない **解析的テスト** と、十分整定させた **統合テスト** の両建て:
@@ -80,6 +96,6 @@ almide build src/eq.almd --target wasm --release -o dist/headset_eq.wasm
 - [x] 数式的正しさを `almide test` で検証(6/6)
 - [x] WASM ビルド成功(public fn が export される)
 - [x] `almide run` デモ
-- [ ] WebAudio デモページ(`web/`)
+- [x] WebAudio デモページ(`web/index.html` — Almide係数 → IIRFilterNode、A/B比較 + 応答描画)
 - [ ] ネイティブ CoreAudio 殻(wasmtime ホスト)
 - [ ] ブロック単位ストリーミング(フィルタ状態をブロック間で持続)
