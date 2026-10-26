@@ -56,7 +56,7 @@ fn process_sample(f: BiQuad, x: Float) -> (Float, BiQuad) = {
 fn process_buffer(f: BiQuad, samples: List[Float]) -> List[Float] = {
   var state = f
   var out = samples
-  for i in 0..list.len(samples) {
+  for i in 0..<list.len(samples) {
     let (y, next) = process_sample(state, samples[i])
     out[i] = y
     state = next

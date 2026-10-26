@@ -24,7 +24,7 @@ fn main() -> Unit = {
   // 1) Whole-chain impulse response - the filter's fingerprint, first 8 taps.
   let ir = eq.process_chain(bands, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
   println("impulse response h[n] (first 8 taps):")
-  for i in 0..8 {
+  for i in 0..<8 {
     println("  h[" + int.to_string(i) + "] = " + float.to_string(eq.at(ir, i)))
   }
   println("")
@@ -34,7 +34,7 @@ fn main() -> Unit = {
   println("measured response of the full chain at each band center:")
   let freqs = [125.0, 250.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0]
   let n = 4800
-  for i in 0..list.len(freqs) {
+  for i in 0..<list.len(freqs) {
     let f0 = eq.at(freqs, i)
     let tone = sine(fs, f0, n)
     let out = eq.process_chain(bands, tone)
