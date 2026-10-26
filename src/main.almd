@@ -11,7 +11,7 @@ fn peak(xs: List[Float]) -> Float =
 
 // A pure sine tone: n samples of sin(2*pi*f*t) at sample rate fs.
 fn sine(fs: Float, f: Float, n: Int) -> List[Float] =
-  list.map(list.range(0, n), (i) => math.sin(2.0 * math.pi() * f * int.to_float(i) / fs))
+  list.map(list.range(0, n), (i) => math.sin(2.0 * math.pi() * f * float.from(i) / fs))
 
 fn main() -> Unit = {
   let fs = 48000.0

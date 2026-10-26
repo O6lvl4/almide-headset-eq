@@ -20,7 +20,7 @@ type BiQuad = {
 // fs: sample rate (Hz), f0: center freq (Hz), q: quality, gain_db: boost/cut (dB).
 
 fn design_peaking(fs: Float, f0: Float, q: Float, gain_db: Float) -> BiQuad = {
-  let a = math.fpow(10.0, gain_db / 40.0)
+  let a = float.pow(10.0, gain_db / 40.0)
   let w0 = 2.0 * math.pi() * f0 / fs
   let cw = math.cos(w0)
   let sw = math.sin(w0)
@@ -168,7 +168,7 @@ test "peaking +6 dB ~doubles its center-frequency amplitude" {
   let f0 = 1000.0
   let n  = 4800
   let x = list.map(list.range(0, n),
-    (i) => math.sin(2.0 * math.pi() * f0 * int.to_float(i) / fs))
+    (i) => math.sin(2.0 * math.pi() * f0 * float.from(i) / fs))
   let y = process_buffer(design_peaking(fs, f0, 1.0, 6.0), x)
   let gain = max_abs_tail(y, n - 480)   // last 10 cycles, post-transient
   assert(gain > 1.9)
